@@ -109,7 +109,7 @@ def update_master_from_subset(
 	stt_col_name: Optional[str],
 	master_sheet: Optional[str],
 	subset_sheet: Optional[str],
-) -> Tuple[str, int, int, int]:
+) -> Tuple[str, int, int, int, int, int, int]:
 	# Đọc vào DataFrame để xác định cột và map dữ liệu subset
 	master_df = pd.read_excel(master_path, engine="openpyxl", sheet_name=master_sheet if master_sheet else 0)
 	sub_df = pd.read_excel(subset_path, engine="openpyxl", sheet_name=subset_sheet if subset_sheet else 0)
@@ -169,8 +169,11 @@ def update_master_from_subset(
 		master_q_col_indices.append(cidx)
 
 	# Cập nhật theo từng hàng khớp STT (giữ nguyên hàng/ô khác)
+	matched_rows = 0
 	updated_rows = 0
 	updated_cells = 0
+	equal_rows = 0
+	nan_only_rows = 0
 	not_matched = 0
 
 	max_row = ws.max_row
@@ -180,13 +183,16 @@ def update_master_from_subset(
 		if key is None or key not in subset_map:
 			not_matched += 1
 			continue
+		matched_rows += 1
 		new_vals_series = subset_map[key]
 		row_updates = 0
+		has_any_non_na = False
 		for cidx, scol in zip(master_q_col_indices, subset_q_cols):
 			new_val = new_vals_series.get(scol)
 			if pd.isna(new_val):
 				# Không ghi đè bằng giá trị trống
 				continue
+			has_any_non_na = True
 			# Chuẩn hóa giá trị 1..5 về int nếu hợp lệ
 			try:
 				iv = int(float(new_val))
@@ -204,6 +210,11 @@ def update_master_from_subset(
 		if row_updates > 0:
 			updated_rows += 1
 			updated_cells += row_updates
+		else:
+			if has_any_non_na:
+				equal_rows += 1
+			else:
+				nan_only_rows += 1
 
 	# Lưu workbook (giữ nguyên tất cả sheet/định dạng)
 	if output_path is None:
@@ -211,7 +222,7 @@ def update_master_from_subset(
 		output_path = os.path.join(os.path.dirname(master_path), f"{base}_updated.xlsx")
 	wb.save(output_path)
 
-	return output_path, updated_rows, updated_cells, not_matched
+	return output_path, updated_rows, updated_cells, not_matched, matched_rows, equal_rows, nan_only_rows
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -236,7 +247,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
 	args = parse_args(argv)
 	try:
-		output_path, updated_rows, updated_cells, not_matched = update_master_from_subset(
+		output_path, updated_rows, updated_cells, not_matched, matched_rows, equal_rows, nan_only_rows = update_master_from_subset(
 			master_path=args.master,
 			subset_path=args.subset,
 			output_path=args.output,
@@ -249,7 +260,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 		)
 		print(
 			f"Đã tạo file cập nhật: {output_path}\n"
-			f"- Hàng cập nhật: {updated_rows}\n- Ô cập nhật: {updated_cells}\n- Hàng master không khớp STT: {not_matched}"
+			f"- Hàng có STT khớp: {matched_rows}\n"
+			f"- Hàng cập nhật (có thay đổi): {updated_rows}\n"
+			f"- Hàng khớp nhưng không đổi (đã giống): {equal_rows}\n"
+			f"- Hàng khớp nhưng subset toàn NaN ở 51 cột: {nan_only_rows}\n"
+			f"- Ô cập nhật: {updated_cells}\n"
+			f"- Hàng master không khớp STT: {not_matched}"
 		)
 		return 0
 	except Exception as e:
