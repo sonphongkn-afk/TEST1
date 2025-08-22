@@ -7,6 +7,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+from openpyxl import load_workbook
 
 
 def normalize_col_map(columns: Iterable[object]) -> Dict[str, object]:
@@ -109,11 +110,11 @@ def update_master_from_subset(
 	master_sheet: Optional[str],
 	subset_sheet: Optional[str],
 ) -> Tuple[str, int, int, int]:
-	# Đọc file
+	# Đọc vào DataFrame để xác định cột và map dữ liệu subset
 	master_df = pd.read_excel(master_path, engine="openpyxl", sheet_name=master_sheet if master_sheet else 0)
 	sub_df = pd.read_excel(subset_path, engine="openpyxl", sheet_name=subset_sheet if subset_sheet else 0)
 
-	# Xác định cột STT cho cả master và subset
+	# Xác định cột STT cho cả master và subset (theo tên, không phân biệt hoa/thường)
 	stt_master = find_stt_column(master_df, preferred=stt_col_name)
 	stt_subset = find_stt_column(sub_df, preferred=stt_col_name)
 
@@ -121,58 +122,94 @@ def update_master_from_subset(
 	master_q_cols = detect_question_columns(master_df, questions, master_first_idx)
 	subset_q_cols = choose_subset_question_columns(sub_df, master_q_cols, subset_first_idx, questions)
 
-	# Tạo map từ STT -> Series dữ liệu câu hỏi ở subset
+	# Map từ STT -> Series dữ liệu câu hỏi ở subset
 	subset_map: Dict[str, pd.Series] = {}
-	dup_keys = 0
 	for _, row in sub_df.iterrows():
 		key = normalize_key(row.get(stt_subset))
 		if key is None:
 			continue
 		subset_map[key] = row[subset_q_cols]
 
-	# Cập nhật master
+	# Mở workbook gốc bằng openpyxl để GIỮ NGUYÊN mọi sheet/định dạng; chỉ cập nhật ô cần thiết
+	wb = load_workbook(master_path)
+	ws = wb[master_sheet] if master_sheet else wb[wb.sheetnames[0]]
+
+	# Tạo map tiêu đề hàng 1 -> chỉ số cột (1-based)
+	header_cells = list(ws.iter_rows(min_row=1, max_row=1, values_only=False))[0]
+	header_map: Dict[str, int] = {}
+	for col_idx, cell in enumerate(header_cells, start=1):
+		val = cell.value
+		key = str(val).strip().lower() if val is not None else ""
+		if key and key not in header_map:
+			header_map[key] = col_idx
+
+	# Xác định vị trí cột STT trong sheet
+	stt_col_idx = header_map.get(str(stt_master).strip().lower())
+	if stt_col_idx is None:
+		# Fallback theo vị trí cột trong DataFrame
+		try:
+			stt_pos = list(master_df.columns).index(stt_master)
+			stt_col_idx = stt_pos + 1
+		except Exception:
+			raise ValueError("Không xác định được cột STT trong sheet master.")
+
+	# Vị trí các cột câu hỏi trong sheet
+	df_cols = list(master_df.columns)
+	master_q_col_indices: List[int] = []
+	for mcol in master_q_cols:
+		key = str(mcol).strip().lower()
+		cidx = header_map.get(key)
+		if cidx is None:
+			# Fallback theo vị trí trong DataFrame
+			try:
+				pos = df_cols.index(mcol)
+				cidx = pos + 1
+			except Exception:
+				raise ValueError(f"Không xác định được vị trí cột '{mcol}' trong sheet master.")
+		master_q_col_indices.append(cidx)
+
+	# Cập nhật theo từng hàng khớp STT (giữ nguyên hàng/ô khác)
 	updated_rows = 0
 	updated_cells = 0
 	not_matched = 0
 
-	for idx, row in master_df.iterrows():
-		key = normalize_key(row.get(stt_master))
+	max_row = ws.max_row
+	for r in range(2, max_row + 1):
+		stt_val = ws.cell(row=r, column=stt_col_idx).value
+		key = normalize_key(stt_val)
 		if key is None or key not in subset_map:
 			not_matched += 1
 			continue
-		new_vals = subset_map[key]
+		new_vals_series = subset_map[key]
 		row_updates = 0
-		for mcol, scol in zip(master_q_cols, subset_q_cols):
-			new_val = new_vals.get(scol)
+		for cidx, scol in zip(master_q_col_indices, subset_q_cols):
+			new_val = new_vals_series.get(scol)
 			if pd.isna(new_val):
-				# Không ghi đè bằng NaN
+				# Không ghi đè bằng giá trị trống
 				continue
-			old_val = row.get(mcol)
-			if pd.isna(old_val) or new_val != old_val:
-				master_df.at[idx, mcol] = new_val
+			# Chuẩn hóa giá trị 1..5 về int nếu hợp lệ
+			try:
+				iv = int(float(new_val))
+				if 1 <= iv <= 5:
+					write_val = iv
+				else:
+					write_val = new_val
+			except Exception:
+				write_val = new_val
+
+			old_val = ws.cell(row=r, column=cidx).value
+			if old_val != write_val:
+				ws.cell(row=r, column=cidx).value = write_val
 				row_updates += 1
 		if row_updates > 0:
 			updated_rows += 1
 			updated_cells += row_updates
 
-	# Ghi kết quả
+	# Lưu workbook (giữ nguyên tất cả sheet/định dạng)
 	if output_path is None:
 		base, ext = os.path.splitext(os.path.basename(master_path))
 		output_path = os.path.join(os.path.dirname(master_path), f"{base}_updated.xlsx")
-
-	with pd.ExcelWriter(output_path, engine="xlsxwriter") as writer:
-		master_df.to_excel(writer, index=False, sheet_name="MASTER_UPDATED")
-		# Ghi một sheet LOG
-		log_df = pd.DataFrame(
-			{
-				"Tổng số hàng master": [len(master_df)],
-				"Số hàng cập nhật": [updated_rows],
-				"Số ô cập nhật": [updated_cells],
-				"Số hàng master không khớp STT": [not_matched],
-				"Số hàng subset": [len(sub_df)],
-			}
-		)
-		log_df.to_excel(writer, index=False, sheet_name="LOG")
+	wb.save(output_path)
 
 	return output_path, updated_rows, updated_cells, not_matched
 
