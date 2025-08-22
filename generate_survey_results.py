@@ -58,7 +58,7 @@ def detect_active_rows(df: pd.DataFrame) -> pd.Series:
 	"""Trả về mask (Series bool) hàng hợp lệ (tổng số học sinh).
 	Ưu tiên các cột nhận diện như 'Họ và tên', 'Số thứ tự', 'STT'. Nếu không có, dùng hàng có dữ liệu ở bất kỳ cột nào.
 	"""
-	lower_cols = {c.lower(): c for c in df.columns}
+	lower_cols = {str(c).strip().lower(): c for c in df.columns}
 	name_like_keys = [
 		"họ và tên", "ho va ten", "họ tên", "ho ten", "họ", "ten", "tên", "name",
 	]
